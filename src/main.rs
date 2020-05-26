@@ -1,52 +1,80 @@
 use std::env;
+use std::io::{Error, ErrorKind, Result};
+use std::path::Path;
 use std::process::Command;
 use std::str::from_utf8;
-
+use std::string::String;
 macro_rules! u8_expect {
     ($e:expr) => {
-        from_utf8($e).expect("Invalid UTF-8 sequence").trim();
+        String::from(from_utf8($e).expect("Invalid UTF-8 sequence").trim())
+    };
+}
+macro_rules! error_wrapper {
+    ($e: expr, $s: expr) => {
+        Err(Error::new($e, $s))
+    };
+}
+macro_rules! invalid_input {
+    ($s: expr) => {
+        error_wrapper!(ErrorKind::InvalidInput, $s)
+    };
+}
+macro_rules! not_found {
+    ($s: expr) => {
+        error_wrapper!(ErrorKind::NotFound, $s)
     };
 }
 
-fn force_option(slash_option: &str, path: &str) -> bool {
+fn force_option(slash_option: &str, path: &str) -> Result<String> {
     let slash = match slash_option {
         "-w" => "\\",
         "-m" => "/",
-        _ => return false,
+        _ => return invalid_input!(format!("unrecognized option: {}", slash_option)),
     };
-    if path.starts_with("/mnt/") {
-        let disk = path
-            .chars()
-            .nth(5)
-            .unwrap()
-            .to_ascii_uppercase()
-            .to_string();
-        println!("{}:{}{}", disk, slash, &path[7..].replace("/", slash));
-        return true;
-    } else {
-        let wsl_head = match Command::new("/bin/wslpath").arg("-w").arg("/").output() {
-            Ok(v) => u8_expect!(&v.stdout).replace("\\", slash),
-            Err(e) => panic!("Failed to execute process: /bin/wslpath {}", e),
-        };
-        let from_root = path.starts_with("/");
-        let cur_dir = env::current_dir().unwrap();
-        if from_root {
-            println!(
-                "{}{}",
-                wsl_head.replace("\\", slash),
-                path[1..].replace("/", "\\")
-            );
-        } else {
-            println!(
-                "{}{}{}{}",
-                wsl_head.replace("\\", slash),
-                cur_dir.to_str().unwrap().replace("/", slash),
-                slash,
-                path.replace("/", slash)
-            );
+    let real_path = match Command::new("realpath").arg("-m").arg(path).output() {
+        Ok(v) => {
+            if !v.stderr.is_empty() {
+                return invalid_input!(format!("Failed to generate {}", u8_expect!(&v.stderr)));
+            } else if !v.stdout.is_empty() {
+                u8_expect!(&v.stdout)
+            } else {
+                return invalid_input!("No output from realpath");
+            }
         }
-        return true;
+        Err(e) => {
+            return not_found!(format!("Failed to execute process: realpath {}", e));
+        }
+    };
+    let components = Path::new(&real_path)
+        .components()
+        .map(|comp| comp.as_os_str().to_str().unwrap())
+        .collect::<Vec<_>>();
+    if components.len() >= 3 && components[1] == "mnt" && components[2].len() == 1 {
+        let disk = components[2].chars().collect::<Vec<_>>()[0];
+        if disk.is_ascii_lowercase() {
+            return Ok(format!(
+                "{}:{}{}",
+                disk.to_uppercase(),
+                slash,
+                components[3..].join(slash)
+            ));
+        }
     }
+    let wsl_head = match Command::new("/bin/wslpath")
+        .arg(slash_option)
+        .arg("/")
+        .output()
+    {
+        Ok(v) => u8_expect!(&v.stdout),
+        Err(e) => {
+            return invalid_input!(format!("Failed to execute process: /bin/wslpath {}", e));
+        }
+    };
+    return Ok(format!(
+        "{}{}",
+        wsl_head,
+        real_path[1..].replace("/", slash)
+    ));
 }
 
 fn main() {
@@ -59,15 +87,19 @@ fn main() {
     };
     match Command::new("/bin/wslpath").args(real_args).output() {
         Ok(v) => {
-            if !v.stderr.is_empty() {
-                if force_enable && !force_option(&args[1], &args[3]) || !force_enable {
-                    eprintln!("{}", u8_expect!(&v.stderr));
+            let stderr = u8_expect!(&v.stderr);
+            if stderr.ends_with("No such file or directory") && force_enable {
+                match force_option(&args[1], &args[3]) {
+                    Ok(v) => println!("{}", v),
+                    Err(e) => eprintln!("{}", e),
                 }
+            } else if !v.status.success() {
+                eprintln!("{}", stderr);
             }
             if !v.stdout.is_empty() {
                 println!("{}", u8_expect!(&v.stdout))
             }
         }
-        Err(e) => panic!("Failed to execute process: /bin/wslpath {}", e),
+        Err(e) => eprintln!("Failed to execute process: /bin/wslpath {}", e),
     };
 }
