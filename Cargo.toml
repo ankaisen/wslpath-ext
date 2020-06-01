@@ -1,10 +1,14 @@
 [package]
-name = "wslpath"
+name = "wslpath-ext"
 version = "0.0.1"
 authors = ["anccerson <xplusxen@gmail.com>"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "wslpath_ext"
+path = "src/wslpath_ext.rs"
 
 [dependencies]
 
